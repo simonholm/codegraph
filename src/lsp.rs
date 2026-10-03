@@ -185,3 +185,24 @@ fn read_message(reader: &mut impl BufRead) -> Result<Value> {
     reader.read_exact(&mut body)?;
     Ok(serde_json::from_slice(&body)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn reads_byte_framed_unicode_messages_and_rejects_truncation() {
+        let message = json!({"jsonrpc": "2.0", "result": "räkna"});
+        let body = serde_json::to_vec(&message).unwrap();
+        let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        frame.extend_from_slice(&body);
+        let mut stream = frame.clone();
+        stream.extend_from_slice(&frame);
+        let mut reader = Cursor::new(stream);
+        assert_eq!(read_message(&mut reader).unwrap(), message);
+        assert_eq!(read_message(&mut reader).unwrap(), message);
+        frame.pop();
+        assert!(read_message(&mut Cursor::new(frame)).is_err());
+    }
+}
