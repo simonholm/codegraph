@@ -1,8 +1,9 @@
+mod graph;
 mod lsp;
 
 use anyhow::{Context, Result, ensure};
+use graph::{Edge, Graph, Node};
 use lsp::Lsp;
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,23 +12,10 @@ use std::{
 };
 use url::Url;
 
-#[derive(Serialize)]
-struct Node {
-    id: String,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct Edge {
-    from: String,
-    to: String,
-}
-
-#[derive(Serialize)]
-struct Graph {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-}
+const USAGE: &str = "Usage: codegraph <rust-repository-path>
+       codegraph callers <function> --graph <graph.json>
+       codegraph callees <function> --graph <graph.json>
+       codegraph trace <from> <to> --graph <graph.json>";
 
 fn main() {
     if let Err(error) = run() {
@@ -37,14 +25,39 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
-    let root = args
-        .next()
-        .context("Usage: codegraph <rust-repository-path>")?;
-    ensure!(
-        args.next().is_none(),
-        "Usage: codegraph <rust-repository-path>"
-    );
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let first = args.first().context(USAGE)?;
+    if args.len() == 1 && (first == "--help" || first == "-h") {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    if let Some(command @ ("callers" | "callees" | "trace")) = first.to_str() {
+        let graph_flag = if command == "trace" { 3 } else { 2 };
+        ensure!(
+            args.len() == graph_flag + 2 && args[graph_flag] == "--graph",
+            "{USAGE}"
+        );
+        let graph: Graph = serde_json::from_slice(
+            &fs::read(&args[graph_flag + 1]).context("Cannot read graph JSON")?,
+        )
+        .context("Cannot parse graph JSON")?;
+        let from = args[1]
+            .to_str()
+            .context("Function selector must be UTF-8")?;
+        let to = if command == "trace" {
+            Some(
+                args[2]
+                    .to_str()
+                    .context("Function selector must be UTF-8")?,
+            )
+        } else {
+            None
+        };
+        print!("{}", graph.query(command, from, to)?);
+        return Ok(());
+    }
+    ensure!(args.len() == 1, "{USAGE}");
+    let root = first;
     let root = fs::canonicalize(root).context("Cannot resolve repository path")?;
     ensure!(
         root.join("Cargo.toml").is_file(),

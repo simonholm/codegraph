@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {"id": "src/main.rs:1:4", "name": "main"},
+    {"id": "src/rust/mod.rs:1:4", "name": "parse"},
+    {"id": "src/rust/mod.rs:5:4", "name": "helper"},
+    {"id": "src/util.rs:1:4", "name": "helper"},
+    {"id": "src/lib.rs:30:4", "name": "alone"}
+  ],
+  "edges": [
+    {"from": "src/main.rs:1:4", "to": "src/rust/mod.rs:1:4"},
+    {"from": "src/main.rs:1:4", "to": "src/util.rs:1:4"},
+    {"from": "src/rust/mod.rs:1:4", "to": "src/rust/mod.rs:5:4"},
+    {"from": "src/util.rs:1:4", "to": "src/rust/mod.rs:1:4"},
+    {"from": "src/rust/mod.rs:5:4", "to": "src/main.rs:1:4"}
+  ]
+}
