@@ -6,6 +6,9 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 pub struct Node {
     pub id: String,
     pub name: String,
+    // Verbatim document-symbol hierarchy, not a canonical Rust item path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_path: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -36,7 +39,11 @@ impl Node {
     }
 
     fn label(&self) -> String {
-        format!("{} [{}]", self.alias(), self.id)
+        format!(
+            "{} [{}]",
+            self.symbol_path.clone().unwrap_or_else(|| self.alias()),
+            self.id
+        )
     }
 }
 
@@ -48,7 +55,11 @@ impl Graph {
         let mut matches: Vec<_> = self
             .nodes
             .iter()
-            .filter(|node| node.name == selector || node.alias() == selector)
+            .filter(|node| {
+                node.name == selector
+                    || node.alias() == selector
+                    || node.symbol_path.as_deref() == Some(selector)
+            })
             .collect();
         matches.sort_by_key(|node| node.label());
         match matches.as_slice() {
@@ -166,6 +177,7 @@ mod tests {
         graph.nodes.push(Node {
             id: "src/rust/mod.rs:10:4".into(),
             name: "helper".into(),
+            symbol_path: None,
         });
         let error = graph
             .query("callers", "rust::helper", None)
@@ -177,11 +189,102 @@ mod tests {
     }
 
     #[test]
+    fn richer_paths_disambiguate_same_file_methods_and_preserve_old_selectors() {
+        let graph: Graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "src/lib.rs:2:8", "name": "search", "symbol_path": "Adapter::search"},
+                {"id": "src/lib.rs:12:12", "name": "search", "symbol_path": "impl Recall::search"},
+                {"id": "src/lib.rs:18:8", "name": "search", "symbol_path": "impl Adapter for Recall::search"},
+                {"id": "src/lib.rs:22:8", "name": "search", "symbol_path": "impl Other for Recall::search"},
+                {"id": "src/lib.rs:32:12", "name": "search", "symbol_path": "nested::search"},
+                {"id": "src/cli.rs:1:4", "name": "dispatch", "symbol_path": "dispatch"}
+            ],
+            "edges": [
+                {"from": "src/cli.rs:1:4", "to": "src/lib.rs:12:12"},
+                {"from": "src/lib.rs:12:12", "to": "src/lib.rs:2:8"}
+            ]
+        })).unwrap();
+        for node in &graph.nodes {
+            let selector = node.symbol_path.as_deref().unwrap();
+            assert_eq!(graph.resolve(selector).unwrap().id, node.id);
+            assert_eq!(graph.resolve(&node.id).unwrap().id, node.id);
+        }
+        let ambiguity = graph.resolve("search").err().unwrap().to_string();
+        for node in graph.nodes.iter().filter(|node| node.name == "search") {
+            assert!(ambiguity.contains(&node.label()));
+        }
+        assert_eq!(graph.resolve("cli::dispatch").unwrap().id, "src/cli.rs:1:4");
+        assert_eq!(graph.resolve("dispatch").unwrap().id, "src/cli.rs:1:4");
+        assert_eq!(
+            graph.query("callees", "impl Recall::search", None).unwrap(),
+            "Callees of impl Recall::search [src/lib.rs:12:12]:\n  Adapter::search [src/lib.rs:2:8]\n"
+        );
+        assert_eq!(
+            graph.query("callers", "impl Recall::search", None).unwrap(),
+            "Callers of impl Recall::search [src/lib.rs:12:12]:\n  dispatch [src/cli.rs:1:4]\n"
+        );
+        assert!(
+            graph
+                .query("trace", "cli::dispatch", Some("Adapter::search"))
+                .unwrap()
+                .contains("-> impl Recall::search [src/lib.rs:12:12]")
+        );
+    }
+
+    #[test]
+    fn repeated_symbol_paths_remain_ambiguous() {
+        let graph: Graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "src/a.rs:1:4", "name": "search", "symbol_path": "impl Recall::search"},
+                {"id": "src/b.rs:1:4", "name": "search", "symbol_path": "impl Recall::search"}
+            ], "edges": []
+        }))
+        .unwrap();
+        let error = graph
+            .resolve("impl Recall::search")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("Ambiguous function"));
+        assert!(error.contains("src/a.rs:1:4"));
+        assert!(error.contains("src/b.rs:1:4"));
+        assert_eq!(graph.resolve("a::search").unwrap().id, "src/a.rs:1:4");
+    }
+
+    #[test]
+    fn root_symbol_path_does_not_hide_bare_name_ambiguity() {
+        let graph: Graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "src/lib.rs:1:4", "name": "search", "symbol_path": "search"},
+                {"id": "src/lib.rs:10:8", "name": "search", "symbol_path": "impl Recall::search"}
+            ], "edges": []
+        }))
+        .unwrap();
+        assert!(
+            graph
+                .resolve("search")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Ambiguous function")
+        );
+        assert_eq!(
+            graph
+                .resolve("src/lib.rs:1:4")
+                .unwrap()
+                .symbol_path
+                .as_deref(),
+            Some("search")
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_ids_and_dangling_edges() {
         let mut graph = fixture();
         graph.nodes.push(Node {
             id: "src/main.rs:1:4".into(),
             name: "duplicate".into(),
+            symbol_path: None,
         });
         assert!(
             graph

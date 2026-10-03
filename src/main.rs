@@ -107,14 +107,28 @@ fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn function_symbols<'a>(symbols: &'a Value, functions: &mut Vec<&'a Value>) {
+fn function_symbols<'a>(
+    symbols: &'a Value,
+    parents: &[&str],
+    functions: &mut Vec<(&'a Value, String)>,
+) {
     if let Some(symbols) = symbols.as_array() {
         for symbol in symbols {
+            let mut path = parents.to_vec();
+            // Only item containers: ignore locals and editor regions/extern labels.
+            // In rust-analyzer, LSP Object (19) represents an impl block.
+            if matches!(
+                symbol["kind"].as_u64(),
+                Some(2 | 5 | 6 | 10 | 11 | 12 | 19 | 23)
+            ) && let Some(name) = symbol["name"].as_str()
+            {
+                path.push(name);
+            }
             // LSP Function (12) and Method (6) are both Rust functions.
             if symbol["kind"] == 12 || symbol["kind"] == 6 {
-                functions.push(symbol);
+                functions.push((symbol, path.join("::")));
             }
-            function_symbols(&symbol["children"], functions);
+            function_symbols(&symbol["children"], &path, functions);
         }
     }
 }
@@ -143,6 +157,7 @@ fn node(root: &Path, item: &Value) -> Result<Option<Node>> {
             .as_str()
             .context("Call item has no name")?
             .to_owned(),
+        symbol_path: None,
     }))
 }
 
@@ -156,8 +171,8 @@ fn extract(lsp: &mut Lsp, root: &Path, files: &[PathBuf]) -> Result<Graph> {
             json!({"textDocument": {"uri": uri.as_str()}}),
         )?;
         let mut functions = Vec::new();
-        function_symbols(&symbols, &mut functions);
-        for symbol in functions {
+        function_symbols(&symbols, &[], &mut functions);
+        for (symbol, symbol_path) in functions {
             let prepared = lsp.request(
                 "textDocument/prepareCallHierarchy",
                 json!({
@@ -172,7 +187,14 @@ fn extract(lsp: &mut Lsp, root: &Path, files: &[PathBuf]) -> Result<Graph> {
                 );
             }
             for item in prepared.as_array().into_iter().flatten() {
-                if let Some(node) = node(root, item)? {
+                if let Some(mut node) = node(root, item)? {
+                    // Attach context only to the exact symbol returned by the server.
+                    // A prepared item may resolve to a different definition.
+                    if item["uri"] == uri.as_str()
+                        && item["selectionRange"] == symbol["selectionRange"]
+                    {
+                        node.symbol_path = Some(symbol_path.clone());
+                    }
                     items.insert(node.id.clone(), item.clone());
                     nodes.insert(node.id.clone(), node);
                 }
@@ -192,7 +214,8 @@ fn extract(lsp: &mut Lsp, root: &Path, files: &[PathBuf]) -> Result<Graph> {
         {
             if let Some(to) = node(root, &call["to"])? {
                 edges.insert((from.clone(), to.id.clone()));
-                nodes.insert(to.id.clone(), to);
+                // Outgoing items have no hierarchy; keep context from discovery.
+                nodes.entry(to.id.clone()).or_insert(to);
             }
         }
     }

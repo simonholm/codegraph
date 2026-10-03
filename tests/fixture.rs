@@ -26,6 +26,9 @@ fn extracts_exact_fixture_graph_through_real_rust_analyzer() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, BTreeSet::from(["main", "parse", "save", "helper"]));
+    for node in nodes {
+        assert_eq!(node["symbol_path"], node["name"]);
+    }
     let ids: BTreeMap<_, _> = nodes
         .iter()
         .map(|node| (node["id"].as_str().unwrap(), node["name"].as_str().unwrap()))
